@@ -1,5 +1,6 @@
 from flask import Flask, render_template, request, redirect, url_for, jsonify, send_file, session, flash
-import sqlite3
+import psycopg2
+import psycopg2.extras
 import qrcode
 import os
 import csv
@@ -22,7 +23,8 @@ load_dotenv()
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'college_event_secret_2024')
 
-DB_PATH = os.environ.get('DATABASE_URL', 'database.db')
+# Use PostgreSQL DATABASE_URL
+DB_URL = os.environ.get('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/college_event')
 QR_DIR = 'qr_codes'
 os.makedirs(QR_DIR, exist_ok=True)
 ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'rahul')
@@ -30,17 +32,36 @@ ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'rahul123')
 
 # ─── Database Setup ────────────────────────────────────────────────────────────
 
+class DBWrapper:
+    def __init__(self):
+        self.conn = psycopg2.connect(DB_URL)
+        
+    def execute(self, query, params=()):
+        # Convert SQLite ? placeholders to PostgreSQL %s
+        query = query.replace('?', '%s')
+        
+        # Convert SQLite last_insert_rowid to PostgreSQL lastval()
+        if query.strip() == 'SELECT last_insert_rowid()':
+            query = 'SELECT lastval()'
+            
+        cur = self.conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        cur.execute(query, params)
+        return cur
+        
+    def commit(self):
+        self.conn.commit()
+        
+    def close(self):
+        self.conn.close()
+
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return DBWrapper()
 
 def init_db():
     conn = get_db()
-    c = conn.cursor()
 
-    c.execute('''CREATE TABLE IF NOT EXISTS events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conn.execute('''CREATE TABLE IF NOT EXISTS events (
+        id SERIAL PRIMARY KEY,
         name TEXT NOT NULL,
         description TEXT,
         date TEXT NOT NULL,
@@ -48,38 +69,38 @@ def init_db():
         venue TEXT NOT NULL,
         max_participants INTEGER NOT NULL,
         share_link TEXT UNIQUE NOT NULL,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
 
-    c.execute('''CREATE TABLE IF NOT EXISTS registrations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conn.execute('''CREATE TABLE IF NOT EXISTS registrations (
+        id SERIAL PRIMARY KEY,
         event_id INTEGER NOT NULL,
         student_name TEXT NOT NULL,
         email TEXT NOT NULL,
         phone TEXT NOT NULL,
         college_id TEXT NOT NULL,
         qr_path TEXT,
-        registered_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY(event_id) REFERENCES events(id)
+        registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE
     )''')
 
-    c.execute('''CREATE TABLE IF NOT EXISTS attendance (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conn.execute('''CREATE TABLE IF NOT EXISTS attendance (
+        id SERIAL PRIMARY KEY,
         registration_id INTEGER NOT NULL UNIQUE,
         event_id INTEGER NOT NULL,
         student_name TEXT,
         college_id TEXT,
-        checked_in_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY(registration_id) REFERENCES registrations(id)
+        checked_in_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(registration_id) REFERENCES registrations(id) ON DELETE CASCADE
     )''')
 
     # Seed admin
-    c.execute('''CREATE TABLE IF NOT EXISTS admins (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conn.execute('''CREATE TABLE IF NOT EXISTS admins (
+        id SERIAL PRIMARY KEY,
         username TEXT UNIQUE NOT NULL,
         password TEXT NOT NULL
     )''')
-    c.execute("INSERT OR IGNORE INTO admins (username, password) VALUES (?, ?)", (ADMIN_USERNAME, ADMIN_PASSWORD))
+    conn.execute("INSERT INTO admins (username, password) VALUES (%s, %s) ON CONFLICT (username) DO NOTHING", (ADMIN_USERNAME, ADMIN_PASSWORD))
 
     conn.commit()
     conn.close()
@@ -492,6 +513,8 @@ def event_stats(event_id):
     conn.close()
     return jsonify({'registrations': reg, 'attendance': att})
 
+# Initialize the database
+init_db()
+
 if __name__ == '__main__':
-    init_db()
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
