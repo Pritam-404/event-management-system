@@ -56,6 +56,7 @@
             <th>Venue</th>
             <th>Registrations</th>
             <th>Attendance</th>
+            <th>Share Link</th>
             <th>Actions</th>
           </tr>
         </thead>
@@ -76,6 +77,12 @@
             </td>
             <td>
               <span class="att-badge">{{ event.att_count }}</span>
+            </td>
+            <td>
+              <div class="share-link-cell">
+                <input type="text" class="share-link-input" value="{{ event.share_url }}" readonly style="width:100%; padding:4px; border:1px solid #ddd; border-radius:4px; font-size:12px;">
+                <button type="button" class="action-btn" onclick="copyShareLink('{{ event.share_url }}')">📋</button>
+              </div>
             </td>
             <td class="actions">
               <a href="{{ url_for('event_registrations', event_id=event.id) }}" class="action-btn">👥</a>
@@ -102,4 +109,21 @@
     {% endif %}
   </div>
 </div>
+
+<script>
+function copyShareLink(url) {
+  navigator.clipboard.writeText(url).then(() => {
+    alert('✅ Share link copied to clipboard!');
+  }).catch(() => {
+    // Fallback for older browsers
+    const input = document.createElement('textarea');
+    input.value = url;
+    document.body.appendChild(input);
+    input.select();
+    document.execCommand('copy');
+    document.body.removeChild(input);
+    alert('✅ Share link copied to clipboard!');
+  });
+}
+</script>
 {% endblock %}

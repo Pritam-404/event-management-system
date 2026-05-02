@@ -5,6 +5,8 @@ import os
 import csv
 import io
 import json
+import uuid
+import base64
 from datetime import datetime
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -12,13 +14,19 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.units import inch
 from functools import wraps
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 app = Flask(__name__)
-app.secret_key = 'college_event_secret_2024'
+app.secret_key = os.environ.get('SECRET_KEY', 'college_event_secret_2024')
 
-DB_PATH = 'database.db'
+DB_PATH = os.environ.get('DATABASE_URL', 'database.db')
 QR_DIR = 'qr_codes'
 os.makedirs(QR_DIR, exist_ok=True)
+ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'rahul')
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'rahul123')
 
 # ─── Database Setup ────────────────────────────────────────────────────────────
 
@@ -39,6 +47,7 @@ def init_db():
         time TEXT NOT NULL,
         venue TEXT NOT NULL,
         max_participants INTEGER NOT NULL,
+        share_link TEXT UNIQUE NOT NULL,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )''')
 
@@ -70,7 +79,7 @@ def init_db():
         username TEXT UNIQUE NOT NULL,
         password TEXT NOT NULL
     )''')
-    c.execute("INSERT OR IGNORE INTO admins (username, password) VALUES ('rahul', 'rahul123')")
+    c.execute("INSERT OR IGNORE INTO admins (username, password) VALUES (?, ?)", (ADMIN_USERNAME, ADMIN_PASSWORD))
 
     conn.commit()
     conn.close()
@@ -88,6 +97,7 @@ def admin_required(f):
 # ─── QR Code Generation ──────────────────────────────────────────────────────
 
 def generate_qr(registration_id, student_name, event_id):
+    """Generate QR code and save as file"""
     data = json.dumps({
         "registration_id": registration_id,
         "student_name": student_name,
@@ -100,6 +110,25 @@ def generate_qr(registration_id, student_name, event_id):
     path = os.path.join(QR_DIR, f"reg_{registration_id}.png")
     img.save(path)
     return path
+
+def generate_qr_base64(registration_id, student_name, event_id):
+    """Generate QR code as base64 string for web display"""
+    data = json.dumps({
+        "registration_id": registration_id,
+        "student_name": student_name,
+        "event_id": event_id
+    })
+    qr = qrcode.QRCode(version=1, box_size=10, border=4)
+    qr.add_data(data)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    
+    # Convert to base64
+    buffer = io.BytesIO()
+    img.save(buffer, format='PNG')
+    buffer.seek(0)
+    qr_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+    return f"data:image/png;base64,{qr_base64}"
 
 # ─── Public Routes ───────────────────────────────────────────────────────────
 
@@ -147,7 +176,7 @@ def register(event_id):
             conn.close()
             return render_template('register.html', event=event, reg_count=reg_count,
                                    error="Event is full. No more registrations allowed.")
-
+        
         conn.execute(
             'INSERT INTO registrations (event_id, student_name, email, phone, college_id) VALUES (?,?,?,?,?)',
             (event_id, name, email, phone, college_id)
@@ -162,6 +191,19 @@ def register(event_id):
 
     conn.close()
     return render_template('register.html', event=event, reg_count=reg_count, error=None)
+
+@app.route('/event/<share_link>', methods=['GET', 'POST'])
+def register_via_link(share_link):
+    """Register for an event using a shareable link"""
+    conn = get_db()
+    event = conn.execute('SELECT * FROM events WHERE share_link = ?', (share_link,)).fetchone()
+    if not event:
+        conn.close()
+        return "Event not found", 404
+    
+    # Redirect to normal registration
+    conn.close()
+    return redirect(url_for('register', event_id=event['id']))
 
 @app.route('/confirmation/<int:reg_id>')
 def confirmation(reg_id):
@@ -225,7 +267,17 @@ def admin_dashboard():
     total_registrations = sum(e['reg_count'] for e in events)
     total_attendance = sum(e['att_count'] for e in events)
     conn.close()
-    return render_template('admin.html', events=events,
+    
+    # Build shareable URLs
+    base_url = request.host_url.rstrip('/')
+    events_with_links = []
+    for event in events:
+        share_url = f"{base_url}/event/{event['share_link']}"
+        event_dict = dict(event)
+        event_dict['share_url'] = share_url
+        events_with_links.append(event_dict)
+    
+    return render_template('admin.html', events=events_with_links,
                            total_events=total_events,
                            total_registrations=total_registrations,
                            total_attendance=total_attendance)
@@ -240,9 +292,10 @@ def create_event():
         time = request.form['time']
         venue = request.form['venue']
         max_p = int(request.form['max_participants'])
+        share_link = str(uuid.uuid4())[:8]  # Generate unique 8-char code
         conn = get_db()
-        conn.execute('INSERT INTO events (name, description, date, time, venue, max_participants) VALUES (?,?,?,?,?,?)',
-                     (name, description, date, time, venue, max_p))
+        conn.execute('INSERT INTO events (name, description, date, time, venue, max_participants, share_link) VALUES (?,?,?,?,?,?,?)',
+                     (name, description, date, time, venue, max_p, share_link))
         conn.commit()
         conn.close()
         return redirect(url_for('admin_dashboard'))
